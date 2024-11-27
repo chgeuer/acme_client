@@ -1,0 +1,142 @@
+# acme_client w/ DNSimple tester
+
+```elixir
+Mix.install([
+  {:req, "~> 0.5.7"},
+  # {:acme_client, github: "cogini/acme_client"}
+  # {:acme_client, github: "chgeuer/acme_client"}
+  {:acme_client, path: "/home/chgeuer/github/chgeuer/acme_client"}
+])
+```
+
+## Section
+
+```elixir
+client = Req.new() |> Fiddler.attach()
+contact = "mailto:foo@mailinator.com"
+{host, zone} = {"foo", "geuer-pollmann.de"}
+identifiers = ["#{host}.#{zone}"]
+```
+
+```elixir
+
+{:ok, account_key} = AcmeClient.generate_account_key()
+# account_key_bin = AcmeClient.key_to_binary(account_key)
+{:ok, session} = AcmeClient.new_session(client: client, account_key: account_key)
+{:ok, session} = AcmeClient.new_nonce(session)
+{:ok, session, %{url: account_kid} = account} = AcmeClient.new_account(session, account_key: account_key, contact: contact, terms_of_service_agreed: true)
+{:ok, session, order} = AcmeClient.new_order(session, identifiers: identifiers)
+{:ok, session, authorizations} = AcmeClient.create_challenge_responses(session, order.object)
+[{authz_endpoint, %{"challenges"=>challenges}}] = authorizations
+
+```
+
+```elixir
+%{ "type" => "dns-01", "response" => response, "status" => "pending", "token" => token, "url" => url } = 
+    challenges |> Enum.find(fn 
+      %{"type" => "dns-01"} -> true 
+      _ -> false
+      end)
+```
+
+```elixir
+[{name, response}] = 
+  for {_authorization, %{"identifier" => identifier, "challenges" => challenges}} <- authorizations,
+      %{"type" => "dns-01", "response" => response} <- challenges
+  do
+    {AcmeClient.dns_challenge_name(identifier), response}
+  end
+```
+
+```elixir
+Req.new(
+  method: :post,
+  auth: fn -> {:bearer, System.get_env("LB_DNSIMPLE_TOKEN")} end,
+  base_url: "https://api.dnsimple.com/v2",
+  url: "/{account}/zones/{zone}/records",
+  path_params_style: :curly,
+  path_params: %{ 
+    account: System.get_env("LB_DNSIMPLE_ACCOUNT_ID"),
+    zone: zone
+  },
+  json: %{
+    "type" => "TXT",
+    "name" => "_acme-challenge.#{host}",
+    "content" => response,
+    "ttl" => 300
+  }
+)
+|> Req.request!()
+```
+
+```elixir
+challenges
+```
+
+```elixir
+authorizations
+
+```
+
+```elixir
+%{
+  account: account,
+  session: session,
+  order: order,
+  authorizations: authorizations
+}
+```
+
+```elixir
+Registry.start_link(keys: :unique, name: AcmeClient.Registry)
+```
+
+```elixir
+defmodule X do
+  def init(args) do
+    IO.inspect({:init, args})
+    {:ok, args}
+  end
+  def get_csr(domain) do
+    IO.inspect({:get_csr, domain})
+    {:ok, nil}
+  end
+  def process_certificate(order, certificate) do
+    IO.inspect({:process_certificate, order, certificate})
+    :ok
+  end
+  def ack_order(order) do
+    IO.inspect({:ack_order, order})
+  end
+  def invalid_order(order) do
+    IO.inspect({:invalid_order, order})
+  end
+  def handle_finalization_error(order, error) do
+    IO.inspect({:handle_finalization_error, order, error})
+  end
+  def publish_challenge_responses(responses) do
+    IO.inspect({:publish_challenge_responses, responses})
+  end
+end
+```
+
+```elixir
+{:ok, poller_pid} =
+  AcmeClient.Poller.start_link(
+    %{
+      session: session, 
+      identifiers: ["foo.geuer-pollmann.de"],
+      cb_mod: X 
+    }
+  )
+  |> case do
+    {:ok, pid} -> {:ok,  pid}
+    {:error, {:already_started, pid}} -> {:ok,  pid}
+  end
+```
+
+```elixir
+poller_pid |> :sys.get_state
+```
+
+<!-- livebook:{"offset":3275,"stamp":{"token":"XCP.NzZvHAZDiLfWDSrs2jqTPtWpt1qoVF0DH9jk5ZtP5CC6OKi4LMsV6afbX-RoaS2zcORZYP06D9y1vNynV7bt5gsps9-jQJJc-HDIMa48Ib781nHbdsWBQve5twnhEcTLPfS-HxOjTFgVQvaunCjKAao","version":2}} -->
