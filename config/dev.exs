@@ -19,11 +19,3 @@ config :acme_client,
 config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
   metadata: [:file, :line]
-
-config :tesla, adapter: Tesla.Adapter.Hackney
-
-# config :tesla, Tesla.Middleware.Logger, debug: false
-# Logging configuration is evaluated at compile time, so Tesla must be
-# recompiled for the configuration to take effect:
-#   mix deps.clean --build tesla
-#   mix deps.compile tesla

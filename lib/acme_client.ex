@@ -40,7 +40,7 @@ defmodule AcmeClient do
   @app :acme_client
 
   @type code :: non_neg_integer()
-  @type client :: Tesla.Env.client()
+  @type client :: Req.Request.t()
   @type reason :: any()
   @type nonce :: binary()
   @type request_ret ::
@@ -58,7 +58,7 @@ defmodule AcmeClient do
   @doc ~S"""
   Create new session connecting to ACME server."
 
-  Sets up the Tesla client library, then makes an API call to the server's
+  Sets up the Req client library, then makes an API call to the server's
   directory URL which maps standard names for operations to the specific URLs
   on the server.
 
@@ -68,11 +68,8 @@ defmodule AcmeClient do
                    Defaults to production server `https://acme-v02.api.letsencrypt.org/directory`,
                    Staging is `https://acme-staging-v02.api.letsencrypt.org/directory`
 
-  * middleware: Tesla middlewares (optional)
-  * adapter: Tesla adapter (optional)
   * account_key: ACME account key (optional)
   * account_kid: ACME account key id, a URL (optional)
-  * tesla_debug: Tesla session debugging (optional, default false)
 
   ## Examples
 
@@ -85,56 +82,39 @@ defmodule AcmeClient do
   """
   @spec new_session(Keyword.t()) :: {:ok, Session.t()} | {:error, term()}
   def new_session(opts \\ []) do
-    debug_opts =
-      case Keyword.fetch(opts, :tesla_debug) do
-        {:ok, value} ->
-          [debug: value]
-
-        :error ->
-          []
+    directory_url =
+      opts
+      |> Keyword.fetch(:directory_url)
+      |> case do
+        {:ok, value} -> value
+        :error -> "https://acme-v02.api.letsencrypt.org/directory"
       end
 
-    middleware_opts = opts[:middleware] || []
-
-    middleware =
-      middleware_opts ++
-        [
-          Tesla.Middleware.OpenTelemetry,
-          # Tesla.Middleware.PathParams,
-          {Tesla.Middleware.JSON, decode_content_types: ["application/problem+json"]},
-          # engine: Jason, engine_opts: [keys: :atoms]
-          {Tesla.Middleware.Logger, debug_opts}
-        ]
-
-    adapter = opts[:adapter]
-
-    client = Tesla.client(middleware, adapter)
+    client =
+      case Keyword.fetch(opts, :client) do
+        {:ok, client} -> client
+        :error -> Req.new()
+      end
 
     session = %Session{
       account_key: opts[:account_key],
       account_kid: opts[:account_kid],
       directory: opts[:directory],
-      rate_limit_id: opts[:rate_limit_id],
-      rate_limit_scale: opts[:rate_limit_scale],
-      rate_limit_limit: opts[:rate_limit_limit]
+      rate_limit_id: opts[:rate_limit_id] || @rate_limit_id,
+      rate_limit_scale: opts[:rate_limit_scale] || @rate_limit_scale,
+      rate_limit_limit: opts[:rate_limit_limit] || @rate_limit_limit,
+      client: client
     }
 
-    if session.directory do
-      {:ok, %{session | client: client}}
-    else
-      directory_url =
-        opts[:directory_url] || "https://acme-v02.api.letsencrypt.org/directory"
+    case Req.request(client, method: :get, url: directory_url) do
+      {:ok, %Req.Response{status: 200, body: body}} ->
+        {:ok, %{session | directory: body, client: client}}
 
-      case Tesla.request(client, method: :get, url: directory_url) do
-        {:ok, %{status: 200, body: body}} ->
-          {:ok, %{session | directory: body, client: client}}
+      {:ok, %Req.Response{} = response} ->
+        {:error, response}
 
-        {:ok, result} ->
-          {:error, result}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -153,12 +133,12 @@ defmodule AcmeClient do
       {:ok, _count} ->
         url = session.directory["newNonce"]
 
-        case Tesla.request(session.client, method: :head, url: url) do
-          {:ok, %{status: 200, headers: headers}} ->
-            {:ok, set_nonce(session, headers)}
+        case Req.request(session.client, method: :head, url: url) do
+          {:ok, %Req.Response{status: 200} = response} ->
+            {:ok, set_nonce(session, response)}
 
-          {:ok, result} ->
-            {:error, result}
+          {:ok, response} ->
+            {:error, response}
 
           {:error, reason} ->
             {:error, reason}
@@ -241,22 +221,30 @@ defmodule AcmeClient do
          ) do
       {:ok, _count} ->
         %{client: client, account_key: account_key, account_kid: kid, nonce: nonce} = session
-        req_headers = [{"content-type", "application/jose+json"}]
 
         protected = %{"alg" => "ES256", "kid" => kid, "nonce" => nonce, "url" => url}
         {_, body} = JOSE.JWS.sign(account_key, payload, protected)
 
-        case Tesla.request(client, method: :post, url: url, body: body, headers: req_headers) do
-          {:ok, %{status: 200, headers: headers} = result} ->
-            session = set_nonce(session, headers)
-            {:ok, session, result}
+        case Req.request(client,
+               method: :post,
+               url: url,
+               headers: %{content_type: "application/jose+json"},
+               json: body
+             ) do
+          {:ok, %Req.Response{status: 200} = response} ->
+            session = set_nonce(session, response)
+            {:ok, session, response}
 
-          {:ok, %{status: 400, body: %{"type" => "urn:ietf:params:acme:error:badNonce"}} = result} ->
-            session = set_nonce(session, result.headers)
+          {:ok,
+           %Req.Response{
+             status: 400,
+             body: %{"type" => "urn:ietf:params:acme:error:badNonce"}
+           } = response} ->
+            session = set_nonce(session, response)
             post_as_get(session, url, payload)
 
-          {:ok, %{headers: headers} = result} ->
-            {:error, set_nonce(session, headers), result}
+          {:ok, %Req.Response{} = response} ->
+            {:error, set_nonce(session, response), response}
 
           {:error, reason} ->
             {:error, reason}
@@ -271,8 +259,8 @@ defmodule AcmeClient do
   @spec get_order(Session.t(), binary()) :: object_ret()
   def get_order(session, url) do
     case post_as_get(session, url) do
-      {:ok, session, result} ->
-        {:ok, session, result.body}
+      {:ok, session, response} ->
+        {:ok, session, response.body}
 
       error ->
         error
@@ -283,8 +271,8 @@ defmodule AcmeClient do
   @spec get_object(Session.t(), binary()) :: object_ret()
   def get_object(session, url) do
     case post_as_get(session, url) do
-      {:ok, session, result} ->
-        {:ok, session, result.body}
+      {:ok, session, response} ->
+        {:ok, session, response.body}
 
       error ->
         error
@@ -326,8 +314,8 @@ defmodule AcmeClient do
           Logger.debug("Getting #{url}")
 
           case AcmeClient.post_as_get(session, url) do
-            {:ok, session, result} ->
-              {session, [{url, result.body} | results]}
+            {:ok, session, response} ->
+              {session, [{url, response.body} | results]}
 
             {:error, _session, reason} ->
               {nil, [{url, {:error, reason}} | results]}
@@ -403,12 +391,11 @@ defmodule AcmeClient do
   """
   @spec new_account(Session.t(), Keyword.t()) ::
           {:ok, Session.t(), map()}
-          | {:error, Session.t(), Tesla.Env.result()}
+          # | {:error, Session.t(), Tesla.Env.result()}
           | {:error, term()}
   def new_account(session, opts) do
     %{client: client, account_key: account_key, nonce: nonce} = session
     url = session.directory["newAccount"]
-    req_headers = [{"content-type", "application/jose+json"}]
 
     map_opts =
       fn
@@ -435,20 +422,25 @@ defmodule AcmeClient do
     protected = %{"alg" => "ES256", "nonce" => nonce, "url" => url, jwk: key_to_jwk(account_key)}
     {_, body} = JOSE.JWS.sign(account_key, payload, protected)
 
-    case Tesla.request(client, method: :post, url: url, body: body, headers: req_headers) do
+    case Req.request(client,
+           method: :post,
+           url: url,
+           headers: %{content_type: "application/jose+json"},
+           json: body
+         ) do
       # Returns 201 on initial create, 200 if called again
-      {:ok, %{status: status, headers: headers} = result} when status in [201, 200] ->
-        session = set_nonce(session, headers)
+      {:ok, %Req.Response{status: status} = response} when status in [200, 201] ->
+        session = set_nonce(session, response)
+        [location] = Req.Response.get_header(response, "location")
 
-        value = %{
-          object: result.body,
-          url: :proplists.get_value("location", headers, nil)
-        }
+        {:ok, %{session | account_kid: location},
+         %{
+           object: response.body,
+           url: location
+         }}
 
-        {:ok, session, value}
-
-      {:ok, %{headers: headers} = result} ->
-        {:error, set_nonce(session, headers), result}
+      {:ok, %Req.Response{} = response} ->
+        {:error, set_nonce(session, response), response}
 
       {:error, reason} ->
         {:error, reason}
@@ -624,21 +616,24 @@ defmodule AcmeClient do
     protected = %{"alg" => "ES256", "kid" => kid, "nonce" => nonce, "url" => url}
     {_, body} = JOSE.JWS.sign(account_key, payload, protected)
 
-    req_headers = [{"content-type", "application/jose+json"}]
-
-    case Tesla.request(client, method: :post, url: url, body: body, headers: req_headers) do
-      {:ok, %{status: status, headers: headers} = result} when status in [201, 200] ->
-        session = set_nonce(session, headers)
+    case Req.request(client,
+           method: :post,
+           url: url,
+           headers: %{content_type: "application/jose+json"},
+           json: body
+         ) do
+      {:ok, %Req.Response{status: status} = result} when status in [201, 200] ->
+        session = set_nonce(session, result)
 
         value = %{
           object: result.body,
-          url: :proplists.get_value("location", headers, nil)
+          url: Req.Response.get_header(result, "location")
         }
 
         {:ok, session, value}
 
-      {:ok, %{headers: headers} = result} ->
-        {:error, set_nonce(session, headers), result}
+      {:ok, %Req.Response{} = result} ->
+        {:error, set_nonce(session, result), result}
 
       {:error, reason} ->
         {:error, reason}
@@ -732,67 +727,42 @@ defmodule AcmeClient do
   # },
 
   @doc ~S"""
-  Create Tesla client.
+  Create Req client.
 
   Options are:
 
   * base_url: URL of server (optional), default "https://acme-staging-v02.api.letsencrypt.org/directory"
-  * adapter: HTTP client adapter (optional)
-  * middleware: Additional Tesla middleware modules (optional)
-
-  ## Examples
-
-      iex> _client = AcmeClient.create_client()
-      %Tesla.Client{
-        adapter: nil,
-        fun: nil,
-        post: [],
-        pre: [
-          {Tesla.Middleware.BaseUrl, :call,
-           ["https://acme-staging-v02.api.letsencrypt.org/directory"]},
-          {Tesla.Middleware.JSON, :call, [[]]}
-        ]
-      }
   """
-  @spec create_client(Keyword.t()) :: Tesla.Client.t()
+  @spec create_client(Keyword.t()) :: Req.Request.t()
   def create_client(opts \\ []) do
     base_url = opts[:base_url] || "https://acme-staging-v02.api.letsencrypt.org/directory"
-    adapter = opts[:adapter]
 
-    opts_middleware = opts[:middleware] || []
-
-    middleware =
-      opts_middleware ++
-        [
-          {Tesla.Middleware.BaseUrl, base_url},
-          Tesla.Middleware.JSON
-        ]
-
-    Tesla.client(middleware, adapter)
+    Req.new(base_url: base_url)
   end
 
-  @spec get_directory(Tesla.Client.t()) :: {:ok, map()} | {:error, map()}
-  def get_directory(client) do
+  @spec get_directory(Req.Request.t()) :: {:ok, map()} | {:error, map()}
+  def get_directory(%Req.Request{} = client) do
     do_get(client, "/directory")
   end
 
   # Internal utility functions
 
   # Set session nonce from server response headers
-  @spec set_nonce(Session.t(), headers()) :: Session.t()
-  defp set_nonce(session, headers) do
-    %{session | nonce: extract_nonce(headers)}
+  @spec set_nonce(Session.t(), Req.Response.t()) :: Session.t()
+  defp set_nonce(session, %Req.Response{} = response) do
+    %{session | nonce: extract_nonce(response)}
   end
 
   @doc "Get nonce from headers"
-  @spec extract_nonce(headers()) :: binary() | nil
-  def extract_nonce(headers) do
-    :proplists.get_value("replay-nonce", headers, nil)
+  @spec extract_nonce(Req.Response.t()) :: binary() | nil
+  def extract_nonce(%Req.Response{} = response) do
+    [replay_nonce] = Req.Response.get_header(response, "replay-nonce")
+    replay_nonce
   end
 
-  @spec update_nonce(Session.t(), headers()) :: Session.t()
-  def update_nonce(session, headers) do
-    %{session | nonce: :proplists.get_value("replay-nonce", headers)}
+  @spec update_nonce(Session.t(), Req.Response.t()) :: Session.t()
+  def update_nonce(session, %Req.Response{} = response) do
+    %{session | nonce: extract_nonce(response)}
   end
 
   # Convert account key to JWK representation used in API
@@ -812,17 +782,17 @@ defmodule AcmeClient do
     JOSE.JWK.from_binary(bin)
   end
 
-  @spec do_get(Tesla.Client.t(), binary()) :: {:ok, map()} | {:error, map()}
-  def do_get(client, url) do
-    tesla_response(Tesla.get(client, url))
+  @spec do_get(Req.Request.t(), binary()) :: {:ok, map()} | {:error, map()}
+  def do_get(%Req.Request{} = client, url) do
+    req_response(Req.get(client, url))
   end
 
-  defp tesla_response({:ok, %{status: 200, body: body}}), do: {:ok, body}
+  defp req_response({:ok, %Req.Response{status: 200, body: body}}), do: {:ok, body}
 
-  defp tesla_response({:ok, %{status: status, body: body}}),
+  defp req_response({:ok, %Req.Response{status: status, body: body}}),
     do: {:error, %{status: status, body: body}}
 
-  defp tesla_response({:error, reason}), do: {:error, %{status: 0, reason: reason}}
+  defp req_response({:error, reason}), do: {:error, %{status: 0, reason: reason}}
 
   @spec request(client(), Session.t(), Keyword.t()) :: request_ret()
   def request(client, session, options \\ []) do
@@ -839,12 +809,12 @@ defmodule AcmeClient do
     Logger.debug("options: #{inspect(options)}")
     Logger.debug("status: #{inspect(status)}")
 
-    case Tesla.request(client, options) do
-      {:ok, %{status: ^status, headers: headers} = result} ->
-        {:ok, set_nonce(session, headers), result}
+    case Req.request(client, options) do
+      {:ok, %{status: ^status} = result} ->
+        {:ok, set_nonce(session, result), result}
 
-      {:ok, %{headers: headers} = result} ->
-        {:error, set_nonce(session, headers), result}
+      {:ok, result} ->
+        {:error, set_nonce(session, result), result}
 
       {:error, reason} ->
         {:error, reason}

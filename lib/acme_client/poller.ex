@@ -230,7 +230,7 @@ defmodule AcmeClient.Poller do
         Logger.debug("HTTP rate limited nonce throttled")
         {:noreply, %{state | session: session}, @rate_limit_times * state.poll_interval}
 
-      {:error, %Tesla.Env{status: 429}} ->
+      {:error, %Req.Response{status: 429}} ->
         Logger.warning("HTTP rate limited nonce")
         {:noreply, state, @rate_limit_times * state.poll_interval}
 

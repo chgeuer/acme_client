@@ -40,13 +40,13 @@ defmodule AcmeClient.MixProject do
 
   def application do
     [
-      extra_applications: [:logger] ++ extra_applications(Mix.env()),
-      mod: {AcmeClient.Application, []}
+      extra_applications: [:logger] ++ extra_applications(Mix.env())
+      # mod: {AcmeClient.Application, []}
     ]
   end
 
-  defp extra_applications(:dev), do: [:tools, :hackney]
-  defp extra_applications(:test), do: [:tools, :hackney]
+  defp extra_applications(:dev), do: [:tools]
+  defp extra_applications(:test), do: [:tools]
   defp extra_applications(_), do: []
 
   defp elixirc_paths(:dev), do: ["lib", "test/support"]
@@ -63,18 +63,16 @@ defmodule AcmeClient.MixProject do
       {:ex_doc, "~> 0.30.0", only: :dev, runtime: false},
       {:ex_rated, "~> 2.1"},
       {:excoveralls, "~> 0.18.0", only: [:dev, :test], runtime: false},
-      {:hackney, "~> 1.17", only: [:dev, :test]},
       {:jason, "~> 1.2"},
       {:jose, "~> 1.11"},
       {:junit_formatter, "~> 3.3", only: [:dev, :test], runtime: false},
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false},
       {:opentelemetry_api, "~> 1.1"},
       # {:opentelemetry_ecto, "~> 1.0"},
-      {:opentelemetry_tesla, "~> 2.3"},
       {:styler, "~> 0.10.0", only: [:dev, :test], runtime: false},
       # {:telemetry, "~> 1.0"},
-      {:tesla, "~> 1.4"},
-      {:x509, "~> 0.8.2"}
+      {:x509, "~> 0.8.2"},
+      {:req, "~> 0.5.7"}
     ]
   end
 

@@ -18,7 +18,7 @@ defmodule AcmeClient.Session do
   @type t :: %__MODULE__{
           account_key: JOSE.JWK.t() | nil,
           account_kid: binary() | nil,
-          client: Tesla.Client.t() | nil,
+          client: Req.Request.t() | nil,
           nonce: binary() | nil,
           directory: map() | nil,
           cb_mod: module() | nil,
